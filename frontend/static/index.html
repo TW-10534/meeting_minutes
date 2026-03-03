@@ -1,0 +1,469 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MM Zettai — Meeting Management System</title>
+    <link rel="stylesheet" href="/static/css/main.css?v=2">
+    <link rel="manifest" href="/manifest.json">
+    <meta name="theme-color" content="#06080f">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+
+<!-- ═══ Toast Container ═══ -->
+<div class="toast-container" id="toastContainer"></div>
+
+<!-- ═══ Loading Overlay ═══ -->
+<div class="loading-overlay" id="loadingOverlay">
+    <div class="waiting-spinner"></div>
+    <p style="color: var(--text-secondary);" id="loadingText">Loading...</p>
+</div>
+
+<!-- ═══ Login View ═══ -->
+<div id="login-view">
+    <div class="login-container">
+        <div class="login-logo">
+            <div class="login-logo-icon">&#x1F310;</div>
+            <h1>MM Zettai</h1>
+            <p>Multilingual Meeting Management System</p>
+        </div>
+        <div class="login-card">
+            <div class="login-tabs">
+                <button class="login-tab active" data-tab="login" onclick="App.Auth.switchTab('login')">Sign In</button>
+                <button class="login-tab" data-tab="register" onclick="App.Auth.switchTab('register')">Register</button>
+            </div>
+
+            <!-- Login Form -->
+            <form id="loginForm" onsubmit="App.Auth.handleLogin(event)">
+                <div class="form-group">
+                    <label>Employee ID</label>
+                    <input type="text" class="form-input" id="loginEmployeeId" placeholder="Enter your employee ID" required autocomplete="username">
+                </div>
+                <div class="form-group">
+                    <label>Password</label>
+                    <input type="password" class="form-input" id="loginPassword" placeholder="Enter your password" required autocomplete="current-password">
+                </div>
+                <button type="submit" class="btn btn-primary btn-full btn-lg" id="loginBtn">Sign In</button>
+            </form>
+
+            <!-- Register Form -->
+            <form id="registerForm" style="display:none" onsubmit="App.Auth.handleRegister(event)">
+                <div class="form-group">
+                    <label>Employee ID</label>
+                    <input type="text" class="form-input" id="regEmployeeId" placeholder="Enter your employee ID" required>
+                </div>
+                <div class="form-group">
+                    <label>Full Name</label>
+                    <input type="text" class="form-input" id="regName" placeholder="Enter your full name" required>
+                </div>
+                <div class="form-group">
+                    <label>Password</label>
+                    <input type="password" class="form-input" id="regPassword" placeholder="Create a password" required>
+                </div>
+                <div class="form-group">
+                    <label>Preferred Language</label>
+                    <select class="form-select" id="regLanguage">
+                        <option value="en">English</option>
+                        <option value="ja">Japanese / &#x65E5;&#x672C;&#x8A9E;</option>
+                        <option value="zh">Chinese / &#x4E2D;&#x6587;</option>
+                    </select>
+                </div>
+                <button type="submit" class="btn btn-primary btn-full btn-lg" id="registerBtn">Create Account</button>
+            </form>
+        </div>
+    </div>
+</div>
+
+<!-- ═══ Main App View ═══ -->
+<div id="app-view">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+        <div class="sidebar-header">
+            <div class="sidebar-brand">
+                <div class="sidebar-brand-icon">&#x1F310;</div>
+                <div>
+                    <h2>MM Zettai</h2>
+                    <small>Meeting System</small>
+                </div>
+            </div>
+        </div>
+
+        <nav class="sidebar-nav">
+            <div class="nav-section">
+                <div class="nav-section-title">Navigation</div>
+                <div class="nav-item active" data-page="dashboard" onclick="App.navigate('dashboard')">
+                    <span class="icon">&#x1F4CA;</span> Dashboard
+                </div>
+            </div>
+            <div class="nav-section">
+                <div class="nav-section-title">Meetings</div>
+                <div class="nav-item" data-page="join" onclick="App.navigate('join')">
+                    <span class="icon">&#x1F517;</span> Join Meeting
+                </div>
+                <div class="nav-item" data-page="create" onclick="App.navigate('create')">
+                    <span class="icon">&#x2795;</span> Create Meeting
+                </div>
+                <div class="nav-item" data-page="schedule" onclick="App.navigate('schedule')">
+                    <span class="icon">&#x1F4C5;</span> Schedule Meeting
+                </div>
+            </div>
+            <div class="nav-section">
+                <div class="nav-section-title">Records</div>
+                <div class="nav-item" data-page="minutes" onclick="App.navigate('minutes')">
+                    <span class="icon">&#x1F4DD;</span> Meeting Minutes
+                </div>
+            </div>
+            <div class="nav-section">
+                <div class="nav-section-title">Account</div>
+                <div class="nav-item" data-page="settings" onclick="App.navigate('settings')">
+                    <span class="icon">&#x2699;</span> Settings
+                </div>
+            </div>
+        </nav>
+
+        <div class="sidebar-footer">
+            <div class="sidebar-user">
+                <div class="sidebar-user-avatar" id="userAvatar">U</div>
+                <div class="sidebar-user-info">
+                    <div class="sidebar-user-name" id="userName">User</div>
+                    <div class="sidebar-user-id" id="userEid">EID</div>
+                </div>
+            </div>
+            <div class="nav-item logout" onclick="App.Auth.logout()">
+                <span class="icon">&#x1F6AA;</span> Log Out
+            </div>
+        </div>
+    </aside>
+
+    <!-- Main Content -->
+    <main class="main-content">
+        <!-- ─── Dashboard Page ─── -->
+        <div class="page-view active" id="page-dashboard">
+            <div class="content-header">
+                <h1>Dashboard</h1>
+                <p>Your meeting overview and calendar</p>
+            </div>
+            <div class="content-body">
+                <div class="stat-cards" id="statCards">
+                    <div class="stat-card">
+                        <div class="stat-card-icon">&#x1F4C5;</div>
+                        <div class="stat-card-value" id="statScheduled">0</div>
+                        <div class="stat-card-label">Scheduled</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-card-icon">&#x2705;</div>
+                        <div class="stat-card-value" id="statCompleted">0</div>
+                        <div class="stat-card-label">Completed</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-card-icon">&#x1F4AC;</div>
+                        <div class="stat-card-value" id="statTotal">0</div>
+                        <div class="stat-card-label">Total Meetings</div>
+                    </div>
+                </div>
+                <div class="dashboard-grid">
+                    <div>
+                        <div class="calendar-card">
+                            <div class="calendar-header">
+                                <h3 id="calendarTitle">March 2026</h3>
+                                <div class="calendar-nav">
+                                    <button onclick="App.Dashboard.prevMonth()">&#x25C0;</button>
+                                    <button onclick="App.Dashboard.nextMonth()">&#x25B6;</button>
+                                </div>
+                            </div>
+                            <div class="calendar-grid" id="calendarGrid"></div>
+                        </div>
+                    </div>
+                    <div>
+                        <div class="upcoming-panel">
+                            <h3>Upcoming Meetings</h3>
+                            <div class="meeting-list" id="upcomingList"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ─── Join Meeting Page ─── -->
+        <div class="page-view" id="page-join">
+            <div class="content-header">
+                <h1>Join Meeting</h1>
+                <p>Enter a meeting code to join an existing meeting</p>
+            </div>
+            <div class="content-body">
+                <div class="form-card join-form-card">
+                    <h3>Enter Meeting Details</h3>
+                    <form onsubmit="App.Meeting.handleJoin(event)">
+                        <div class="form-group">
+                            <label>Meeting Code</label>
+                            <input type="text" class="form-input" id="joinCode" placeholder="e.g., MTG-ABC123" required style="text-transform: uppercase;">
+                        </div>
+                        <div class="form-group">
+                            <label>Your Language</label>
+                            <select class="form-select" id="joinLanguage">
+                                <option value="en">English</option>
+                                <option value="ja">Japanese / &#x65E5;&#x672C;&#x8A9E;</option>
+                                <option value="zh">Chinese / &#x4E2D;&#x6587;</option>
+                            </select>
+                        </div>
+                        <div class="form-actions">
+                            <button type="submit" class="btn btn-primary btn-lg">Join Meeting</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+
+        <!-- ─── Create Meeting Page ─── -->
+        <div class="page-view" id="page-create">
+            <div class="content-header">
+                <h1>Create Meeting</h1>
+                <p>Start a new instant meeting</p>
+            </div>
+            <div class="content-body">
+                <div class="form-card">
+                    <h3>New Meeting</h3>
+                    <form onsubmit="App.Meeting.handleCreate(event)">
+                        <div class="form-group">
+                            <label>Meeting Name</label>
+                            <input type="text" class="form-input" id="createName" placeholder="e.g., Q1 Planning Meeting" required>
+                        </div>
+                        <div class="form-group">
+                            <label>Your Language</label>
+                            <select class="form-select" id="createLanguage">
+                                <option value="en">English</option>
+                                <option value="ja">Japanese / &#x65E5;&#x672C;&#x8A9E;</option>
+                                <option value="zh">Chinese / &#x4E2D;&#x6587;</option>
+                            </select>
+                        </div>
+                        <div class="form-actions">
+                            <button type="submit" class="btn btn-primary btn-lg">Create &amp; Start Meeting</button>
+                        </div>
+                    </form>
+                    <div class="invite-link-box" id="inviteLinkBox">
+                        <label>Meeting Invite Link</label>
+                        <div class="invite-link-row">
+                            <input type="text" class="form-input" id="inviteLinkInput" readonly>
+                            <button type="button" class="btn btn-secondary" onclick="App.Meeting.copyInviteLink()">Copy</button>
+                        </div>
+                        <div style="margin-top: 12px;">
+                            <label>Meeting Code</label>
+                            <div class="invite-link-row">
+                                <input type="text" class="form-input" id="inviteCodeInput" readonly style="font-size:18px; font-weight:700; letter-spacing:2px; text-align:center;">
+                                <button type="button" class="btn btn-secondary" onclick="App.Meeting.copyInviteCode()">Copy</button>
+                            </div>
+                        </div>
+                        <div style="margin-top: 16px;">
+                            <button type="button" class="btn btn-success btn-full" onclick="App.Meeting.enterCreatedMeeting()">Enter Meeting Room</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ─── Schedule Meeting Page ─── -->
+        <div class="page-view" id="page-schedule">
+            <div class="content-header">
+                <h1>Schedule Meeting</h1>
+                <p>Plan a meeting for a future date and time</p>
+            </div>
+            <div class="content-body">
+                <div class="form-card">
+                    <h3>Schedule a Meeting</h3>
+                    <form onsubmit="App.Meeting.handleSchedule(event)">
+                        <div class="form-group">
+                            <label>Meeting Name</label>
+                            <input type="text" class="form-input" id="scheduleName" placeholder="e.g., Weekly Standup" required>
+                        </div>
+                        <div class="form-group">
+                            <label>Date &amp; Time</label>
+                            <input type="datetime-local" class="form-input" id="scheduleDate" required>
+                        </div>
+                        <div class="form-group">
+                            <label>Your Language</label>
+                            <select class="form-select" id="scheduleLanguage">
+                                <option value="en">English</option>
+                                <option value="ja">Japanese / &#x65E5;&#x672C;&#x8A9E;</option>
+                                <option value="zh">Chinese / &#x4E2D;&#x6587;</option>
+                            </select>
+                        </div>
+                        <div class="form-actions">
+                            <button type="submit" class="btn btn-primary btn-lg">Schedule Meeting</button>
+                        </div>
+                    </form>
+                    <div class="invite-link-box" id="scheduleInviteLinkBox">
+                        <label>Invite Link (share with participants)</label>
+                        <div class="invite-link-row">
+                            <input type="text" class="form-input" id="scheduleInviteLinkInput" readonly>
+                            <button type="button" class="btn btn-secondary" onclick="App.Utils.copyText(document.getElementById('scheduleInviteLinkInput').value)">Copy</button>
+                        </div>
+                        <div style="margin-top: 12px;">
+                            <label>Meeting Code</label>
+                            <div class="invite-link-row">
+                                <input type="text" class="form-input" id="scheduleInviteCodeInput" readonly style="font-size:18px; font-weight:700; letter-spacing:2px; text-align:center;">
+                                <button type="button" class="btn btn-secondary" onclick="App.Utils.copyText(document.getElementById('scheduleInviteCodeInput').value)">Copy</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ─── Meeting Minutes List Page ─── -->
+        <div class="page-view" id="page-minutes">
+            <div class="content-header">
+                <h1>Meeting Minutes</h1>
+                <p>Access summaries and recordings from past meetings</p>
+            </div>
+            <div class="content-body">
+                <div class="minutes-list" id="minutesList"></div>
+            </div>
+        </div>
+
+        <!-- ─── Meeting Minutes Detail Page ─── -->
+        <div class="page-view" id="page-minutes-detail">
+            <div class="content-header">
+                <div style="display:flex; align-items:center; gap:12px;">
+                    <button class="btn btn-ghost" onclick="App.navigate('minutes')">&#x2190; Back</button>
+                    <div>
+                        <h1 id="minutesDetailTitle">Meeting Minutes</h1>
+                        <p id="minutesDetailSubtitle"></p>
+                    </div>
+                </div>
+            </div>
+            <div class="content-body">
+                <div class="minutes-detail" id="minutesDetailContent"></div>
+            </div>
+        </div>
+
+        <!-- ─── Settings Page ─── -->
+        <div class="page-view" id="page-settings">
+            <div class="content-header">
+                <h1>Settings</h1>
+                <p>Manage your account preferences</p>
+            </div>
+            <div class="content-body">
+                <div class="form-card settings-card">
+                    <div class="settings-section">
+                        <h3>Profile</h3>
+                        <form onsubmit="App.Settings.saveProfile(event)">
+                            <div class="form-group">
+                                <label>Display Name</label>
+                                <input type="text" class="form-input" id="settingsName" placeholder="Your name">
+                            </div>
+                            <div class="form-group">
+                                <label>Preferred Language</label>
+                                <select class="form-select" id="settingsLanguage">
+                                    <option value="en">English</option>
+                                    <option value="ja">Japanese / &#x65E5;&#x672C;&#x8A9E;</option>
+                                    <option value="zh">Chinese / &#x4E2D;&#x6587;</option>
+                                </select>
+                            </div>
+                            <button type="submit" class="btn btn-primary">Save Changes</button>
+                        </form>
+                    </div>
+                    <div class="settings-section">
+                        <h3>Appearance</h3>
+                        <div class="form-group">
+                            <label>Theme</label>
+                            <div style="display:flex; gap:8px;">
+                                <button type="button" class="btn btn-secondary" id="themeDarkBtn" onclick="App.Settings.setTheme('dark')" style="flex:1;">&#x1F319; Dark</button>
+                                <button type="button" class="btn btn-secondary" id="themeLightBtn" onclick="App.Settings.setTheme('light')" style="flex:1;">&#x2600; Light</button>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="settings-section">
+                        <h3>Change Password</h3>
+                        <form onsubmit="App.Settings.changePassword(event)">
+                            <div class="form-group">
+                                <label>Current Password</label>
+                                <input type="password" class="form-input" id="settingsCurrentPw" placeholder="Enter current password">
+                            </div>
+                            <div class="form-group">
+                                <label>New Password</label>
+                                <input type="password" class="form-input" id="settingsNewPw" placeholder="Enter new password">
+                            </div>
+                            <button type="submit" class="btn btn-primary">Update Password</button>
+                        </form>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </main>
+</div>
+
+<!-- ═══ Meeting Room View (Full Screen) ═══ -->
+<div id="meeting-room-view">
+    <div class="meeting-room-header">
+        <div class="meeting-room-info">
+            <h2 id="meetingRoomTitle">Meeting</h2>
+            <span class="meeting-room-timer" id="meetingRoomTimer">00:00:00</span>
+            <span class="meeting-room-participants-count">
+                &#x1F465; <span id="meetingRoomParticipantCount">0</span> participants
+            </span>
+        </div>
+        <div style="display:flex; gap:8px;">
+            <button class="btn btn-secondary btn-sm" onclick="App.Meeting.copyCurrentMeetingCode()">
+                &#x1F4CB; Copy Code
+            </button>
+            <button class="end-meeting-btn" id="endMeetingBtn" onclick="App.Meeting.endMeeting()" style="display:none;">
+                End Meeting
+            </button>
+            <button class="btn btn-danger btn-sm" id="leaveMeetingBtn" onclick="App.Meeting.leaveMeeting()">
+                Leave
+            </button>
+        </div>
+    </div>
+
+    <div class="meeting-room-body">
+        <div class="transcript-panel">
+            <div class="transcript-messages" id="transcriptMessages">
+                <div class="empty-state" id="transcriptEmpty">
+                    <div class="empty-state-icon">&#x1F399;</div>
+                    <h3>Waiting for speech...</h3>
+                    <p>Press and hold the microphone button or spacebar to speak</p>
+                </div>
+            </div>
+            <div class="meeting-controls">
+                <button class="mic-button" id="micButton"
+                        onclick="App.Meeting.toggleRecording()">
+                    &#x1F3A4;
+                </button>
+            </div>
+        </div>
+
+        <div class="meeting-room-sidebar">
+            <h3>Participants</h3>
+            <div class="participants-list" id="participantsList"></div>
+            <div class="waiting-room-section" id="waitingRoomSection" style="display:none;">
+                <h4>&#x23F3; Waiting Room</h4>
+                <div id="pendingList"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Waiting overlay for participants -->
+    <div class="waiting-overlay" id="waitingOverlay">
+        <div class="waiting-spinner"></div>
+        <h3>Waiting for host approval</h3>
+        <p>The meeting host will let you in shortly...</p>
+    </div>
+</div>
+
+<!-- ═══ Meeting Ended Modal ═══ -->
+<div class="modal-overlay" id="meetingEndedModal">
+    <div class="modal-content">
+        <h2>Meeting Ended</h2>
+        <p class="subtitle">AI-generated summary of the meeting</p>
+        <div class="summary-text" id="meetingEndedSummary"></div>
+        <div class="modal-actions">
+            <button class="btn btn-secondary" onclick="App.Meeting.closeMeetingEndedModal()">Close</button>
+            <button class="btn btn-primary" onclick="App.Meeting.viewMeetingMinutes()">View Full Minutes</button>
+        </div>
+    </div>
+</div>
+
+<script src="/static/js/app.js?v=3"></script>
+</body>
+</html>
