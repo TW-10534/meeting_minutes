@@ -18,7 +18,7 @@ import models
 
 logger = logging.getLogger("mm_zettai.meeting")
 
-RECORDINGS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "recordings")
+RECORDINGS_DIR = db.RECORDINGS_DIR
 os.makedirs(RECORDINGS_DIR, exist_ok=True)
 
 
@@ -33,6 +33,7 @@ class MeetingRoom:
         self.pending: Dict[int, WebSocket] = {}      # user_id -> websocket (waiting room)
         self.audio_chunks: List[str] = []            # paths to audio chunks
         self.chunk_counter = 0
+        self.notes: str = ""                         # shared meeting notes
 
     async def add_pending(self, user_id: int, ws: WebSocket, name: str, language: str):
         """Add a participant to the waiting room."""
@@ -63,7 +64,8 @@ class MeetingRoom:
 
         await self._send(ws, {
             "type": "approved",
-            "message": "You have been approved to join the meeting."
+            "message": "You have been approved to join the meeting.",
+            "notes": self.notes
         })
 
         # Send current participant list to the new participant
@@ -123,7 +125,8 @@ class MeetingRoom:
         await self._send(ws, {
             "type": "host_joined",
             "participants": participants,
-            "pendingParticipants": pending_list
+            "pendingParticipants": pending_list,
+            "notes": self.notes
         })
 
     async def remove_connection(self, user_id: int):
@@ -141,11 +144,10 @@ class MeetingRoom:
         speaker_name = self.user_names.get(user_id, "Unknown")
         speaker_lang = self.user_languages.get(user_id, "en")
 
-        # Save audio chunk for recording
-        chunk_path = os.path.join(
-            RECORDINGS_DIR,
-            f"{self.meeting_id}_{self.chunk_counter:06d}_{user_id}.webm"
-        )
+        # Save audio chunk in per-meeting subdirectory
+        meeting_dir = db.get_meeting_recording_dir(self.meeting_id)
+        chunk_filename = f"{self.chunk_counter:06d}_{user_id}.webm"
+        chunk_path = os.path.join(meeting_dir, chunk_filename)
         self.chunk_counter += 1
         with open(chunk_path, "wb") as f:
             f.write(audio_data)
@@ -211,6 +213,59 @@ class MeetingRoom:
                 os.unlink(tmp_path)
             except Exception:
                 pass
+
+    async def handle_chat(self, user_id: int, message: str):
+        """Handle a chat message: save to DB and broadcast."""
+        user_name = self.user_names.get(user_id, "Unknown")
+        await db.save_chat_message(self.meeting_id, user_id, user_name, message)
+        await self._broadcast({
+            "type": "chat",
+            "userId": user_id,
+            "userName": user_name,
+            "message": message,
+            "timestamp": datetime.utcnow().isoformat()
+        })
+
+    async def handle_reaction(self, user_id: int, reaction_type: str):
+        """Handle a reaction: broadcast only (transient, no DB)."""
+        await self._broadcast({
+            "type": "reaction",
+            "userId": user_id,
+            "userName": self.user_names.get(user_id, "Unknown"),
+            "reaction": reaction_type
+        })
+
+    async def handle_action_item(self, user_id: int, assigned_to: int, description: str):
+        """Handle manual action item creation during a meeting."""
+        user_name = self.user_names.get(user_id, "Unknown")
+        item_id = await db.save_action_item(self.meeting_id, user_id, assigned_to, description)
+        item = await db.get_action_item(item_id)
+        if not item:
+            return
+        # Notify assignee if different from creator
+        if assigned_to != user_id:
+            meeting = await db.get_meeting(self.meeting_id)
+            meeting_name = meeting["name"] if meeting else "a meeting"
+            await db.create_notification(
+                assigned_to, "action_item_assigned", "New Action Item",
+                f'{user_name} assigned you a task in "{meeting_name}": {description[:100]}',
+                self.meeting_id
+            )
+        # Broadcast to all participants
+        await self._broadcast({
+            "type": "action_item_created",
+            "item": item
+        })
+
+    async def handle_note_update(self, user_id: int, content: str):
+        """Handle shared notes update: save to DB and broadcast to others."""
+        self.notes = content
+        await db.update_meeting_notes(self.meeting_id, content)
+        await self._broadcast({
+            "type": "note_update",
+            "userId": user_id,
+            "content": content
+        }, exclude={user_id})
 
     async def _translate_and_store(self, transcript_id, text, source_lang, target_lang, translations_dict):
         """Translate text and store result."""

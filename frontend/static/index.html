@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MM Zettai — Meeting Management System</title>
-    <link rel="stylesheet" href="/static/css/main.css?v=2">
+    <link rel="stylesheet" href="/static/css/main.css?v=4">
     <link rel="manifest" href="/manifest.json">
     <meta name="theme-color" content="#06080f">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -87,6 +87,18 @@
                     <small>Meeting System</small>
                 </div>
             </div>
+            <div class="notification-bell" onclick="App.Notifications.toggle()">
+                &#x1F514;
+                <span class="notification-badge" id="notificationBadge" style="display:none;">0</span>
+            </div>
+            <!-- Notification Panel -->
+            <div class="notification-panel" id="notificationPanel" style="display:none;">
+                <div class="notification-panel-header">
+                    <span>Notifications</span>
+                    <button class="btn btn-ghost btn-sm" onclick="App.Notifications.markAllRead()">Mark all read</button>
+                </div>
+                <div class="notification-list" id="notificationList"></div>
+            </div>
         </div>
 
         <nav class="sidebar-nav">
@@ -109,9 +121,21 @@
                 </div>
             </div>
             <div class="nav-section">
+                <div class="nav-section-title">People</div>
+                <div class="nav-item" data-page="users" onclick="App.navigate('users')">
+                    <span class="icon">&#x1F465;</span> Users
+                </div>
+            </div>
+            <div class="nav-section">
                 <div class="nav-section-title">Records</div>
                 <div class="nav-item" data-page="minutes" onclick="App.navigate('minutes')">
                     <span class="icon">&#x1F4DD;</span> Meeting Minutes
+                </div>
+                <div class="nav-item" data-page="my-tasks" onclick="App.navigate('my-tasks')">
+                    <span class="icon">&#x1F4CB;</span> My Action Items
+                </div>
+                <div class="nav-item" data-page="search" onclick="App.navigate('search')">
+                    <span class="icon">&#x1F50D;</span> Search
                 </div>
             </div>
             <div class="nav-section">
@@ -173,6 +197,14 @@
                                 </div>
                             </div>
                             <div class="calendar-grid" id="calendarGrid"></div>
+                            <!-- Day Detail Panel (shown when clicking a date) -->
+                            <div class="calendar-day-detail" id="calendarDayDetail" style="display:none;">
+                                <div class="calendar-day-detail-header">
+                                    <h4 id="calendarDayDetailTitle">Meetings</h4>
+                                    <button class="btn btn-ghost btn-sm" onclick="App.Dashboard.closeDayDetail()">&#x2715;</button>
+                                </div>
+                                <div class="calendar-day-detail-list" id="calendarDayDetailList"></div>
+                            </div>
                         </div>
                     </div>
                     <div>
@@ -254,6 +286,11 @@
                                 <button type="button" class="btn btn-secondary" onclick="App.Meeting.copyInviteCode()">Copy</button>
                             </div>
                         </div>
+                        <div class="invite-users-section" id="createInviteUsersSection">
+                            <label>Add People</label>
+                            <div class="invite-users-list" id="createInviteUsersList"></div>
+                            <button type="button" class="btn btn-primary btn-full" onclick="App.Meeting.inviteSelected('create')">Invite Selected</button>
+                        </div>
                         <div style="margin-top: 16px;">
                             <button type="button" class="btn btn-success btn-full" onclick="App.Meeting.enterCreatedMeeting()">Enter Meeting Room</button>
                         </div>
@@ -305,6 +342,11 @@
                                 <button type="button" class="btn btn-secondary" onclick="App.Utils.copyText(document.getElementById('scheduleInviteCodeInput').value)">Copy</button>
                             </div>
                         </div>
+                        <div class="invite-users-section" id="scheduleInviteUsersSection">
+                            <label>Add People</label>
+                            <div class="invite-users-list" id="scheduleInviteUsersList"></div>
+                            <button type="button" class="btn btn-primary btn-full" onclick="App.Meeting.inviteSelected('schedule')">Invite Selected</button>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -324,16 +366,80 @@
         <!-- ─── Meeting Minutes Detail Page ─── -->
         <div class="page-view" id="page-minutes-detail">
             <div class="content-header">
-                <div style="display:flex; align-items:center; gap:12px;">
-                    <button class="btn btn-ghost" onclick="App.navigate('minutes')">&#x2190; Back</button>
-                    <div>
-                        <h1 id="minutesDetailTitle">Meeting Minutes</h1>
-                        <p id="minutesDetailSubtitle"></p>
+                <div style="display:flex; align-items:center; justify-content:space-between; width:100%;">
+                    <div style="display:flex; align-items:center; gap:12px;">
+                        <button class="btn btn-ghost" onclick="App.navigate('minutes')">&#x2190; Back</button>
+                        <div>
+                            <h1 id="minutesDetailTitle">Meeting Minutes</h1>
+                            <p id="minutesDetailSubtitle"></p>
+                        </div>
+                    </div>
+                    <div class="export-btn-group">
+                        <button class="btn btn-secondary btn-sm" onclick="App.Export.asMarkdown()">&#x1F4C4; Markdown</button>
+                        <button class="btn btn-secondary btn-sm" onclick="App.Export.asWord()">&#x1F4D1; Word</button>
+                        <button class="btn btn-secondary btn-sm" onclick="App.Export.asPDF()">&#x1F5A8; PDF</button>
+                        <button class="btn btn-danger btn-sm" onclick="App.Minutes.deleteMeeting()">&#x1F5D1; Delete</button>
                     </div>
                 </div>
             </div>
             <div class="content-body">
                 <div class="minutes-detail" id="minutesDetailContent"></div>
+            </div>
+        </div>
+
+        <!-- ─── My Action Items Page ─── -->
+        <div class="page-view" id="page-my-tasks">
+            <div class="content-header">
+                <h1>My Action Items</h1>
+                <p>Tasks assigned to you across all meetings</p>
+            </div>
+            <div class="content-body">
+                <div class="my-action-items-list" id="myActionItemsList"></div>
+            </div>
+        </div>
+
+        <!-- ─── Search Page ─── -->
+        <div class="page-view" id="page-search">
+            <div class="content-header">
+                <h1>Search</h1>
+                <p>Search across all meetings, transcripts, and summaries</p>
+            </div>
+            <div class="content-body">
+                <div class="search-bar">
+                    <input type="text" class="form-input" id="searchInput" placeholder="Search meetings, transcripts..." onkeydown="if(event.key==='Enter') App.Search.execute()">
+                    <button class="btn btn-primary" onclick="App.Search.execute()">Search</button>
+                </div>
+                <div class="search-filters">
+                    <div class="filter-group">
+                        <label>From</label>
+                        <input type="date" class="form-input" id="searchFromDate">
+                    </div>
+                    <div class="filter-group">
+                        <label>To</label>
+                        <input type="date" class="form-input" id="searchToDate">
+                    </div>
+                    <div class="filter-group">
+                        <label>Language</label>
+                        <select class="form-select" id="searchLanguage">
+                            <option value="">All</option>
+                            <option value="en">English</option>
+                            <option value="ja">Japanese</option>
+                            <option value="zh">Chinese</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="search-results" id="searchResults"></div>
+            </div>
+        </div>
+
+        <!-- ─── Users Page ─── -->
+        <div class="page-view" id="page-users">
+            <div class="content-header">
+                <h1>Users</h1>
+                <p>All registered users in the system</p>
+            </div>
+            <div class="content-body">
+                <div class="users-list" id="usersList"></div>
             </div>
         </div>
 
@@ -426,6 +532,13 @@
                 </div>
             </div>
             <div class="meeting-controls">
+                <div class="reaction-bar">
+                    <button class="reaction-btn" onclick="App.Meeting.sendReaction('hand')" title="Raise Hand">&#x270B;</button>
+                    <button class="reaction-btn" onclick="App.Meeting.sendReaction('thumbsup')" title="Thumbs Up">&#x1F44D;</button>
+                    <button class="reaction-btn" onclick="App.Meeting.sendReaction('clap')" title="Clap">&#x1F44F;</button>
+                    <button class="reaction-btn" onclick="App.Meeting.sendReaction('heart')" title="Heart">&#x2764;</button>
+                    <button class="reaction-btn" onclick="App.Meeting.sendReaction('laugh')" title="Laugh">&#x1F602;</button>
+                </div>
                 <button class="mic-button" id="micButton"
                         onclick="App.Meeting.toggleRecording()">
                     &#x1F3A4;
@@ -434,13 +547,48 @@
         </div>
 
         <div class="meeting-room-sidebar">
-            <h3>Participants</h3>
-            <div class="participants-list" id="participantsList"></div>
-            <div class="waiting-room-section" id="waitingRoomSection" style="display:none;">
-                <h4>&#x23F3; Waiting Room</h4>
-                <div id="pendingList"></div>
+            <div class="sidebar-tabs">
+                <button class="sidebar-tab active" data-tab="participants" onclick="App.Meeting.switchSidebarTab('participants')">Participants</button>
+                <button class="sidebar-tab" data-tab="chat" onclick="App.Meeting.switchSidebarTab('chat')">Chat <span class="chat-unread-badge" id="chatUnreadBadge" style="display:none;">0</span></button>
+                <button class="sidebar-tab" data-tab="notes" onclick="App.Meeting.switchSidebarTab('notes')">Notes</button>
+                <button class="sidebar-tab" data-tab="tasks" onclick="App.Meeting.switchSidebarTab('tasks')">Tasks <span class="chat-unread-badge" id="actionItemsBadge" style="display:none;">0</span></button>
+            </div>
+            <!-- Participants Tab -->
+            <div class="sidebar-tab-content active" id="tab-participants">
+                <div class="participants-list" id="participantsList"></div>
+                <div class="waiting-room-section" id="waitingRoomSection" style="display:none;">
+                    <h4>&#x23F3; Waiting Room</h4>
+                    <div id="pendingList"></div>
+                </div>
+            </div>
+            <!-- Chat Tab -->
+            <div class="sidebar-tab-content" id="tab-chat">
+                <div class="chat-messages" id="chatMessages"></div>
+                <div class="chat-input-area">
+                    <input type="text" class="form-input" id="chatInput" placeholder="Type a message..." onkeydown="if(event.key==='Enter') App.Meeting.sendChat()">
+                    <button class="btn btn-primary btn-sm" onclick="App.Meeting.sendChat()">Send</button>
+                </div>
+            </div>
+            <!-- Notes Tab -->
+            <div class="sidebar-tab-content" id="tab-notes">
+                <textarea class="meeting-notes-textarea" id="meetingNotesTextarea" placeholder="Shared meeting notes..."></textarea>
+            </div>
+            <!-- Tasks Tab -->
+            <div class="sidebar-tab-content" id="tab-tasks">
+                <div class="action-items-list" id="meetingActionItemsList"></div>
+                <div class="action-items-add">
+                    <h4 style="margin:0 0 8px 0; font-size:13px; color:var(--text-secondary);">Add Action Item</h4>
+                    <select class="form-select" id="actionItemAssignee" style="margin-bottom:8px; font-size:13px; padding:6px 8px;">
+                        <option value="">Assign to...</option>
+                    </select>
+                    <input type="text" class="form-input" id="actionItemDescription" placeholder="Task description..." style="margin-bottom:8px; font-size:13px; padding:6px 8px;">
+                    <button class="btn btn-primary btn-sm btn-full" onclick="App.Meeting.addActionItem()">Add Task</button>
+                </div>
             </div>
         </div>
+
+        <!-- Floating Reactions Container -->
+        <div class="floating-reactions" id="floatingReactions"></div>
     </div>
 
     <!-- Waiting overlay for participants -->
@@ -464,6 +612,6 @@
     </div>
 </div>
 
-<script src="/static/js/app.js?v=3"></script>
+<script src="/static/js/app.js?v=5"></script>
 </body>
 </html>

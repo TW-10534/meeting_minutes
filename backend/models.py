@@ -6,6 +6,7 @@ Follows the same GPU/model configuration as the VT project.
 
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import re
@@ -21,6 +22,7 @@ logger = logging.getLogger("mm_zettai.models")
 
 VLLM_URL = os.environ.get("VLLM_URL", "http://localhost:8010/v1/chat/completions")
 VLLM_MODEL = os.environ.get("VLLM_MODEL", "Qwen/Qwen3-Omni-30B-A3B-Instruct")
+VLLM_CTX_LIMIT = int(os.environ.get("VLLM_CTX_LIMIT", "4096"))
 WHISPER_DEVICE = int(os.environ.get("WHISPER_DEVICE", "2"))
 TTS_CACHE_DIR = os.path.join(tempfile.gettempdir(), "mm_zettai_tts_cache")
 
@@ -208,11 +210,15 @@ async def translate_text(text: str, source_lang: str, target_lang: str) -> str:
                         "max_tokens": 2048,
                         "temperature": temperature,
                         "top_p": 0.9,
+                        "chat_template_kwargs": {"enable_thinking": False},
                     }
                 )
+                if response.status_code != 200:
+                    logger.error(f"vLLM translation error {response.status_code}: {response.text}")
                 response.raise_for_status()
                 data = response.json()
                 translated = data["choices"][0]["message"]["content"]
+                translated = re.sub(r"<think>.*?</think>", "", translated, flags=re.DOTALL).strip()
                 cleaned = _clean_translation(translated, target_lang)
                 if cleaned:
                     return cleaned
@@ -246,44 +252,70 @@ async def text_to_speech(text: str, language: str) -> str:
 
 # ─── AI Summary Generation ───────────────────────────────────────────────────
 
+def _estimate_tokens(text: str) -> int:
+    """Rough token estimate: ~1 token per 3 characters for mixed EN/CJK text."""
+    return max(1, len(text) // 3)
+
+
 async def generate_meeting_summary(meeting_name: str, participants: list,
-                                    transcripts: list) -> str:
+                                    transcripts: list,
+                                    output_language: str = "en") -> str:
     """Generate an AI summary of the meeting using Qwen3."""
     if not transcripts:
         return "No transcripts available for this meeting."
+
+    lang_name = LANGUAGE_NAMES.get(output_language, "English")
 
     participant_list = "\n".join(
         f"- {p['name']} (Language: {LANGUAGE_NAMES.get(p['language'], p['language'])})"
         for p in participants
     )
 
-    transcript_text = "\n".join(
-        f"[{t['timestamp']}] {t['speaker_name']} ({LANGUAGE_NAMES.get(t['original_language'], t['original_language'])}): {t['original_text']}"
-        for t in transcripts
+    system_prompt = (
+        f"You are a professional meeting minute writer. Write the entire summary in {lang_name}.\n"
+        f"Produce detailed formal meeting minutes in the following structure:\n"
+        f"1. Meeting title and date\n"
+        f"2. Purpose of the meeting\n"
+        f"3. Attendees - list all participants by name\n"
+        f"4. Agenda / Overview - what the meeting covered\n"
+        f"5. Discussion Details - for EVERY topic discussed, write who said what.\n"
+        f"   Format questions as: Question from [Name]: ...\n"
+        f"   Format responses as: => Response: ...\n"
+        f"   Include ALL questions, opinions, proposals, and responses with speaker names.\n"
+        f"6. Decisions Made\n"
+        f"7. Action Items\n"
+        f"8. Other Notes - additional remarks attributed to speakers (e.g. '[Name] commented that...')\n"
+        f"Be thorough. Every statement must be attributed to the speaker who said it.\n"
+        f"Write ONLY in {lang_name}."
     )
 
-    system_prompt = """You are a professional meeting minute writer. Generate a comprehensive, well-structured meeting summary from the provided transcript.
+    # Build transcript text, truncating if it would exceed context budget
+    # Reserve tokens for: system prompt, user prompt wrapper, and output
+    min_output_tokens = 512
+    system_tokens = _estimate_tokens(system_prompt)
+    wrapper_tokens = _estimate_tokens(f"Meeting: {meeting_name}\n\nParticipants:\n{participant_list}\n\nTranscript:\n\n\nGenerate detailed meeting minutes.")
+    available_for_transcript = VLLM_CTX_LIMIT - system_tokens - wrapper_tokens - min_output_tokens
 
-Your summary MUST include these sections:
-1. **Meeting Overview** - Brief description of the meeting purpose and context
-2. **Participants** - List of attendees and their roles
-3. **Key Discussion Points** - Main topics discussed, organized by theme
-4. **Decisions Made** - Any decisions or agreements reached
-5. **Action Items** - Tasks assigned, with responsible persons if identifiable
-6. **Speaker Contributions** - Brief summary of each speaker's main points
+    transcript_lines = []
+    token_count = 0
+    for t in transcripts:
+        line = f"[{t['speaker_name']}] {t['original_text']}"
+        line_tokens = _estimate_tokens(line)
+        if token_count + line_tokens > available_for_transcript:
+            transcript_lines.append("... (transcript truncated due to length)")
+            break
+        transcript_lines.append(line)
+        token_count += line_tokens
 
-Write in clear, professional English. Be specific about who said what.
-Use bullet points for clarity. Keep the summary concise but comprehensive."""
+    transcript_text = "\n".join(transcript_lines)
 
-    user_prompt = f"""Meeting: {meeting_name}
+    user_prompt = f"Meeting: {meeting_name}\n\nParticipants:\n{participant_list}\n\nTranscript:\n{transcript_text}\n\nGenerate detailed meeting minutes in {lang_name}."
 
-Participants:
-{participant_list}
+    # Calculate safe max_tokens for output
+    input_tokens = _estimate_tokens(system_prompt + user_prompt)
+    max_tokens = max(256, VLLM_CTX_LIMIT - input_tokens)
 
-Full Transcript:
-{transcript_text}
-
-Please generate the meeting summary."""
+    logger.info(f"Summary request: ~{input_tokens} input tokens, max_tokens={max_tokens}, ctx_limit={VLLM_CTX_LIMIT}")
 
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
@@ -295,16 +327,130 @@ Please generate the meeting summary."""
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt}
                     ],
-                    "max_tokens": 4096,
+                    "max_tokens": max_tokens,
                     "temperature": 0.3,
+                    "chat_template_kwargs": {"enable_thinking": False},
                 }
             )
+            if response.status_code != 200:
+                logger.error(f"vLLM summary error {response.status_code}: {response.text}")
             response.raise_for_status()
             data = response.json()
-            return data["choices"][0]["message"]["content"]
+            content = data["choices"][0]["message"]["content"]
+            content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+            return content
     except Exception as e:
         logger.error(f"Summary generation failed: {e}")
         return f"Error generating summary: {str(e)}"
+
+
+# ─── Action Item Extraction ──────────────────────────────────────────────
+
+async def extract_action_items(meeting_name: str, participants: list,
+                                transcripts: list) -> list:
+    """Extract action items from meeting transcripts using Qwen3.
+    Returns list of {assigned_to_name, assigned_to_id, created_by_name, created_by_id, description}.
+    """
+    if not transcripts:
+        return []
+
+    # Build participant map for the prompt
+    participant_lines = []
+    for p in participants:
+        participant_lines.append(f"- ID:{p['user_id']} Name:\"{p['name']}\"")
+    participant_text = "\n".join(participant_lines)
+
+    system_prompt = (
+        "You are a meeting assistant that extracts action items from meeting transcripts.\n"
+        "An action item is a task assigned to a specific person during the meeting.\n"
+        "Look for phrases like: \"please do X\", \"can you handle X\", \"X will take care of\", "
+        "\"I'll do X\", \"your task is X\", \"action item: X\", etc.\n\n"
+        "You are given the list of participants with their IDs and names.\n"
+        "For each action item, identify:\n"
+        "- assigned_to_id: the participant ID of the person who should do the task\n"
+        "- assigned_to_name: their name\n"
+        "- created_by_id: the participant ID of the person who assigned/requested the task\n"
+        "- created_by_name: their name\n"
+        "- description: a clear, concise description of the task\n\n"
+        "If someone volunteers themselves (\"I'll do X\"), they are both assigner and assignee.\n\n"
+        "Return ONLY a JSON array. If no action items found, return [].\n"
+        "Example: [{\"assigned_to_id\": 1, \"assigned_to_name\": \"John\", "
+        "\"created_by_id\": 2, \"created_by_name\": \"Jane\", "
+        "\"description\": \"Prepare the quarterly report by Friday\"}]"
+    )
+
+    # Build transcript text with token budgeting
+    min_output_tokens = 512
+    system_tokens = _estimate_tokens(system_prompt)
+    wrapper_tokens = _estimate_tokens(f"Meeting: {meeting_name}\n\nParticipants:\n{participant_text}\n\nTranscript:\n\n\nExtract action items as JSON.")
+    available_for_transcript = VLLM_CTX_LIMIT - system_tokens - wrapper_tokens - min_output_tokens
+
+    transcript_lines = []
+    token_count = 0
+    for t in transcripts:
+        line = f"[{t['speaker_name']}] {t['original_text']}"
+        line_tokens = _estimate_tokens(line)
+        if token_count + line_tokens > available_for_transcript:
+            transcript_lines.append("... (transcript truncated)")
+            break
+        transcript_lines.append(line)
+        token_count += line_tokens
+
+    transcript_text = "\n".join(transcript_lines)
+
+    user_prompt = (
+        f"Meeting: {meeting_name}\n\n"
+        f"Participants:\n{participant_text}\n\n"
+        f"Transcript:\n{transcript_text}\n\n"
+        f"Extract all action items as a JSON array."
+    )
+
+    input_tokens = _estimate_tokens(system_prompt + user_prompt)
+    max_tokens = max(256, VLLM_CTX_LIMIT - input_tokens)
+
+    logger.info(f"Action item extraction: ~{input_tokens} input tokens, max_tokens={max_tokens}")
+
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(
+                VLLM_URL,
+                json={
+                    "model": VLLM_MODEL,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    "max_tokens": max_tokens,
+                    "temperature": 0.3,
+                    "chat_template_kwargs": {"enable_thinking": False},
+                }
+            )
+            if response.status_code != 200:
+                logger.error(f"vLLM action items error {response.status_code}: {response.text}")
+                return []
+            data = response.json()
+            content = data["choices"][0]["message"]["content"]
+            content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+
+            # Extract JSON array from response
+            match = re.search(r'\[.*\]', content, re.DOTALL)
+            if match:
+                items = json.loads(match.group())
+                # Validate participant IDs
+                valid_ids = {p['user_id'] for p in participants}
+                validated = []
+                for item in items:
+                    if (isinstance(item, dict) and
+                        item.get('assigned_to_id') in valid_ids and
+                        item.get('created_by_id') in valid_ids and
+                        item.get('description')):
+                        validated.append(item)
+                logger.info(f"Extracted {len(validated)} action items from meeting {meeting_name}")
+                return validated
+            return []
+    except Exception as e:
+        logger.error(f"Action item extraction failed: {e}")
+        return []
 
 
 # ─── Health Check ─────────────────────────────────────────────────────────────
