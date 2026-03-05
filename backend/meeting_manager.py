@@ -4,12 +4,11 @@ Handles real-time meeting communication, participant management, and audio proce
 """
 
 import asyncio
-import json
 import logging
 import os
 import tempfile
 from datetime import datetime
-from typing import Dict, List, Set
+from typing import Dict, List, Optional, Set
 
 from fastapi import WebSocket
 
@@ -34,6 +33,12 @@ class MeetingRoom:
         self.audio_chunks: List[str] = []            # paths to audio chunks
         self.chunk_counter = 0
         self.notes: str = ""                         # shared meeting notes
+        # Live streaming state
+        self._user_audio_locks: Dict[int, asyncio.Lock] = {}
+        self._user_context: Dict[int, list] = {}     # user_id -> list of recent transcript texts
+        self._user_active_transcript: Dict[int, int] = {}   # user_id -> current transcript_id being built
+        self._user_accumulated_text: Dict[int, str] = {}    # user_id -> full accumulated original text
+        self._last_speaker_id: Optional[int] = None          # who spoke last (room-level)
 
     async def add_pending(self, user_id: int, ws: WebSocket, name: str, language: str):
         """Add a participant to the waiting room."""
@@ -133,86 +138,232 @@ class MeetingRoom:
         """Remove a connection from the meeting."""
         self.connections.pop(user_id, None)
         self.pending.pop(user_id, None)
+        # Clean up per-user streaming state
+        self._user_audio_locks.pop(user_id, None)
+        self._user_context.pop(user_id, None)
+        self._user_active_transcript.pop(user_id, None)
+        self._user_accumulated_text.pop(user_id, None)
+        if self._last_speaker_id == user_id:
+            self._last_speaker_id = None
         await self._broadcast({
             "type": "participant_left",
             "userId": user_id,
             "name": self.user_names.get(user_id, "Unknown")
         })
 
-    async def process_audio(self, user_id: int, audio_data: bytes):
-        """Process an audio chunk: transcribe, translate, broadcast."""
-        speaker_name = self.user_names.get(user_id, "Unknown")
-        speaker_lang = self.user_languages.get(user_id, "en")
+    def _get_user_lock(self, user_id: int) -> asyncio.Lock:
+        """Get or create a per-user lock for ordered audio processing."""
+        if user_id not in self._user_audio_locks:
+            self._user_audio_locks[user_id] = asyncio.Lock()
+        return self._user_audio_locks[user_id]
 
-        # Save audio chunk in per-meeting subdirectory
-        meeting_dir = db.get_meeting_recording_dir(self.meeting_id)
-        chunk_filename = f"{self.chunk_counter:06d}_{user_id}.webm"
-        chunk_path = os.path.join(meeting_dir, chunk_filename)
-        self.chunk_counter += 1
-        with open(chunk_path, "wb") as f:
-            f.write(audio_data)
-        self.audio_chunks.append(chunk_path)
+    async def process_audio(self, user_id: int, audio_data: bytes, segment_id: int = None):
+        """Process an audio segment: transcribe, translate, broadcast.
 
-        # Save to temp file for Whisper
-        with tempfile.NamedTemporaryFile(suffix=".webm", delete=False) as tmp:
-            tmp.write(audio_data)
-            tmp_path = tmp.name
+        Merges continuous speech from the same speaker into one growing paragraph.
+        A different speaker triggers a new bubble.
+        """
+        async with self._get_user_lock(user_id):
+            speaker_name = self.user_names.get(user_id, "Unknown")
+            speaker_lang = self.user_languages.get(user_id, "en")
 
-        try:
-            # Transcribe
-            original_text = await models.transcribe_audio(tmp_path, speaker_lang)
-            if not original_text.strip():
-                return
+            # Save audio chunk in per-meeting subdirectory
+            meeting_dir = db.get_meeting_recording_dir(self.meeting_id)
+            chunk_filename = f"{self.chunk_counter:06d}_{user_id}.webm"
+            chunk_path = os.path.join(meeting_dir, chunk_filename)
+            self.chunk_counter += 1
+            with open(chunk_path, "wb") as f:
+                f.write(audio_data)
+            self.audio_chunks.append(chunk_path)
 
-            # Save transcript to DB
-            transcript_id = await db.save_transcript(
-                self.meeting_id, user_id, speaker_name, original_text, speaker_lang
-            )
+            # Save to temp file for Whisper
+            with tempfile.NamedTemporaryFile(suffix=".webm", delete=False) as tmp:
+                tmp.write(audio_data)
+                tmp_path = tmp.name
 
-            # Get all unique target languages in the meeting (excluding speaker's language)
-            target_languages = set()
-            for uid, lang in self.user_languages.items():
-                if uid in self.connections and lang != speaker_lang:
-                    target_languages.add(lang)
-
-            # Translate to each target language
-            translations = {}
-            translation_tasks = []
-            for target_lang in target_languages:
-                translation_tasks.append(
-                    self._translate_and_store(
-                        transcript_id, original_text, speaker_lang, target_lang, translations
-                    )
-                )
-            if translation_tasks:
-                await asyncio.gather(*translation_tasks)
-
-            # Broadcast transcript and translations to all participants
-            for uid, ws in self.connections.items():
-                user_lang = self.user_languages.get(uid, "en")
-                message = {
-                    "type": "transcript",
-                    "speakerId": user_id,
-                    "speakerName": speaker_name,
-                    "originalText": original_text,
-                    "originalLanguage": speaker_lang,
-                    "timestamp": datetime.utcnow().isoformat()
-                }
-                if user_lang == speaker_lang:
-                    message["displayText"] = original_text
-                else:
-                    message["displayText"] = translations.get(user_lang, original_text)
-                    message["translatedText"] = translations.get(user_lang, "")
-                try:
-                    await self._send(ws, message)
-                except Exception as e:
-                    logger.error(f"Failed to send to user {uid}: {e}")
-
-        finally:
             try:
-                os.unlink(tmp_path)
-            except Exception:
-                pass
+                # Transcribe
+                original_text = await models.transcribe_audio(tmp_path, speaker_lang)
+                if not original_text.strip():
+                    if user_id in self.connections:
+                        await self._send(self.connections[user_id], {
+                            "type": "transcript_ack",
+                            "segmentId": segment_id,
+                            "empty": True
+                        })
+                    return
+
+                # Determine continuation vs new turn
+                is_continuation = (
+                    self._last_speaker_id == user_id
+                    and user_id in self._user_active_transcript
+                )
+
+                # Get target languages
+                target_languages = set()
+                for uid, lang in self.user_languages.items():
+                    if uid in self.connections and lang != speaker_lang:
+                        target_languages.add(lang)
+
+                if is_continuation:
+                    # --- CONTINUATION: append to existing bubble ---
+                    transcript_id = self._user_active_transcript[user_id]
+                    self._user_accumulated_text[user_id] += " " + original_text
+                    full_text = self._user_accumulated_text[user_id]
+
+                    # Update DB transcript with full accumulated text
+                    await db.update_transcript(transcript_id, original_text=full_text)
+
+                    # Re-translate full paragraph and update DB
+                    translations = {}
+                    await self._retranslate_and_update(
+                        transcript_id, full_text, speaker_lang, target_languages, translations
+                    )
+
+                    # Broadcast update (use "transcript" so late joiners auto-create the bubble)
+                    for uid, ws in self.connections.items():
+                        user_lang = self.user_languages.get(uid, "en")
+                        message = {
+                            "type": "transcript",
+                            "transcriptId": transcript_id,
+                            "status": "interim",
+                            "speakerId": user_id,
+                            "speakerName": speaker_name,
+                            "originalText": full_text,
+                            "originalLanguage": speaker_lang,
+                            "timestamp": datetime.utcnow().isoformat()
+                        }
+                        if user_lang == speaker_lang:
+                            message["displayText"] = full_text
+                        else:
+                            translated = translations.get(user_lang, full_text)
+                            message["displayText"] = translated
+                            if translated != full_text:
+                                message["translatedText"] = full_text
+                        try:
+                            await self._send(ws, message)
+                        except Exception as e:
+                            logger.error(f"Failed to send update to user {uid}: {e}")
+
+                else:
+                    # --- NEW TURN: create a new bubble ---
+                    transcript_id = await db.save_transcript(
+                        self.meeting_id, user_id, speaker_name, original_text, speaker_lang
+                    )
+
+                    # Set up active transcript state
+                    self._user_active_transcript[user_id] = transcript_id
+                    self._user_accumulated_text[user_id] = original_text
+                    self._last_speaker_id = user_id
+
+                    # Translate first segment with context from previous paragraphs
+                    translations = {}
+                    context_texts = self._user_context.get(user_id, [])
+                    translation_tasks = []
+                    for target_lang in target_languages:
+                        translation_tasks.append(
+                            self._translate_and_store_with_context(
+                                transcript_id, original_text, speaker_lang, target_lang,
+                                translations, context_texts
+                            )
+                        )
+                    if translation_tasks:
+                        await asyncio.gather(*translation_tasks)
+
+                    # Broadcast new bubble
+                    for uid, ws in self.connections.items():
+                        user_lang = self.user_languages.get(uid, "en")
+                        message = {
+                            "type": "transcript",
+                            "transcriptId": transcript_id,
+                            "status": "interim",
+                            "speakerId": user_id,
+                            "speakerName": speaker_name,
+                            "originalText": original_text,
+                            "originalLanguage": speaker_lang,
+                            "timestamp": datetime.utcnow().isoformat()
+                        }
+                        if user_lang == speaker_lang:
+                            message["displayText"] = original_text
+                        else:
+                            translated = translations.get(user_lang, original_text)
+                            message["displayText"] = translated
+                            if translated != original_text:
+                                message["translatedText"] = original_text
+                        try:
+                            await self._send(ws, message)
+                        except Exception as e:
+                            logger.error(f"Failed to send to user {uid}: {e}")
+
+                # Send ack back to speaker
+                if user_id in self.connections:
+                    await self._send(self.connections[user_id], {
+                        "type": "transcript_ack",
+                        "segmentId": segment_id,
+                        "transcriptId": transcript_id,
+                        "empty": False
+                    })
+
+            finally:
+                try:
+                    os.unlink(tmp_path)
+                except Exception:
+                    pass
+
+    async def _retranslate_and_update(self, transcript_id: int, full_text: str,
+                                       source_lang: str, target_languages: set,
+                                       translations_dict: dict):
+        """Re-translate full accumulated text and upsert translations in DB."""
+        tasks = []
+        for target_lang in target_languages:
+            tasks.append(
+                self._retranslate_one(transcript_id, full_text, source_lang, target_lang, translations_dict)
+            )
+        if tasks:
+            await asyncio.gather(*tasks)
+
+    async def _retranslate_one(self, transcript_id: int, full_text: str,
+                                source_lang: str, target_lang: str, translations_dict: dict):
+        """Re-translate full text for one target language and upsert in DB."""
+        translated = await models.translate_text(full_text, source_lang, target_lang)
+        translations_dict[target_lang] = translated
+        await db.upsert_translation(transcript_id, target_lang, translated)
+
+    async def finalize_speech(self, user_id: int):
+        """Called when user stops speaking (mic off or 5s silence).
+        Marks the active paragraph bubble as final."""
+        async with self._get_user_lock(user_id):
+            await self._do_finalize_speech(user_id)
+
+    async def _do_finalize_speech(self, user_id: int):
+        """Internal finalize logic, called under per-user lock."""
+        transcript_id = self._user_active_transcript.pop(user_id, None)
+        accumulated = self._user_accumulated_text.pop(user_id, None)
+
+        # Save accumulated text as context for future paragraphs
+        if accumulated:
+            if user_id not in self._user_context:
+                self._user_context[user_id] = []
+            self._user_context[user_id].append(accumulated)
+            self._user_context[user_id] = self._user_context[user_id][-5:]
+
+        if transcript_id is not None:
+            # Mark bubble as final
+            for uid, ws in self.connections.items():
+                try:
+                    await self._send(ws, {
+                        "type": "transcript_update",
+                        "transcriptId": transcript_id,
+                        "status": "final"
+                    })
+                except Exception:
+                    pass
+
+        # Broadcast coherence_complete (safety net for frontend)
+        await self._broadcast({
+            "type": "coherence_complete",
+            "speakerId": user_id
+        })
 
     async def handle_chat(self, user_id: int, message: str):
         """Handle a chat message: save to DB and broadcast."""
@@ -270,6 +421,15 @@ class MeetingRoom:
     async def _translate_and_store(self, transcript_id, text, source_lang, target_lang, translations_dict):
         """Translate text and store result."""
         translated = await models.translate_text(text, source_lang, target_lang)
+        translations_dict[target_lang] = translated
+        await db.save_translation(transcript_id, target_lang, translated)
+
+    async def _translate_and_store_with_context(self, transcript_id, text, source_lang,
+                                                  target_lang, translations_dict, context_texts):
+        """Translate text with context and store result."""
+        translated = await models.translate_text_with_context(
+            text, source_lang, target_lang, context_texts
+        )
         translations_dict[target_lang] = translated
         await db.save_translation(transcript_id, target_lang, translated)
 

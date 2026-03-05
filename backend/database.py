@@ -138,6 +138,26 @@ async def init_db():
         except Exception:
             pass  # Column already exists
 
+        # Add unique index for translations upsert (deduplicate first if needed)
+        try:
+            await db.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_translations_unique "
+                "ON translations(transcript_id, target_language)"
+            )
+        except Exception:
+            # Duplicates exist — keep only the latest row per (transcript_id, target_language)
+            try:
+                await db.execute(
+                    "DELETE FROM translations WHERE id NOT IN "
+                    "(SELECT MAX(id) FROM translations GROUP BY transcript_id, target_language)"
+                )
+                await db.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_translations_unique "
+                    "ON translations(transcript_id, target_language)"
+                )
+            except Exception:
+                pass
+
         # Create FTS5 virtual table for full-text search
         try:
             await db.execute("""
@@ -489,6 +509,40 @@ async def get_transcript_by_id(transcript_id: int):
         cursor = await db.execute("SELECT * FROM transcripts WHERE id = ?", (transcript_id,))
         row = await cursor.fetchone()
         return dict(row) if row else None
+
+
+async def get_translation(transcript_id: int, target_language: str):
+    """Get a specific translation for a transcript and target language."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT * FROM translations WHERE transcript_id = ? AND target_language = ?",
+            (transcript_id, target_language)
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+
+async def update_translation(transcript_id: int, target_language: str, translated_text: str):
+    """Update an existing translation."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE translations SET translated_text = ? WHERE transcript_id = ? AND target_language = ?",
+            (translated_text, transcript_id, target_language)
+        )
+        await db.commit()
+
+
+async def upsert_translation(transcript_id: int, target_language: str, translated_text: str):
+    """Insert or update a translation (single DB call)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO translations (transcript_id, target_language, translated_text) "
+            "VALUES (?, ?, ?) "
+            "ON CONFLICT(transcript_id, target_language) DO UPDATE SET translated_text = excluded.translated_text",
+            (transcript_id, target_language, translated_text)
+        )
+        await db.commit()
 
 
 async def update_transcript(transcript_id: int, **kwargs):

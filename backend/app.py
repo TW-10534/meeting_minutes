@@ -702,7 +702,11 @@ async def meeting_websocket(websocket: WebSocket, meeting_id: str):
                 audio_b64 = data.get("data")
                 if audio_b64:
                     audio_bytes = base64.b64decode(audio_b64)
-                    await room.process_audio(user_id, audio_bytes)
+                    segment_id = data.get("segmentId")
+                    asyncio.create_task(room.process_audio(user_id, audio_bytes, segment_id=segment_id))
+
+            elif msg_type == "finalize_speech":
+                asyncio.create_task(room.finalize_speech(user_id))
 
             elif msg_type == "chat":
                 chat_msg = (data.get("message") or "").strip()

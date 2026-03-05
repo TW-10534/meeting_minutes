@@ -1158,6 +1158,24 @@ a:hover { text-decoration: underline; }
     animation: messageIn 0.3s ease-out;
 }
 
+/* Interim transcript (may be refined by coherence check) */
+.transcript-message.transcript-interim {
+    opacity: 0.85;
+    border-left: 2px solid var(--accent-amber);
+    padding-left: 10px;
+}
+.transcript-message.transcript-interim .transcript-text::after {
+    content: " ...";
+    color: var(--text-muted);
+}
+
+/* Final transcript (after coherence check) */
+.transcript-message.transcript-final {
+    border-left: 2px solid var(--accent-green);
+    padding-left: 10px;
+    transition: opacity 0.3s, border-color 0.3s;
+}
+
 @keyframes messageIn {
     from { opacity: 0; transform: translateY(10px); }
     to { opacity: 1; transform: translateY(0); }
@@ -1388,6 +1406,7 @@ a:hover { text-decoration: underline; }
 }
 
 .mic-button {
+    position: relative;
     width: 64px;
     height: 64px;
     border-radius: 50%;
@@ -1405,6 +1424,22 @@ a:hover { text-decoration: underline; }
 .mic-button:hover {
     border-color: var(--accent-blue);
     color: var(--accent-blue);
+}
+
+/* Mic listening state (on, but no speech) */
+.mic-button.mic-active {
+    border-color: var(--accent-green);
+    background: rgba(34, 197, 94, 0.1);
+    color: var(--accent-green);
+    box-shadow: 0 0 0 calc(var(--vol-intensity, 0) * 12px) rgba(34, 197, 94, 0.2);
+}
+
+/* Mic speaking state (on, speech detected) */
+.mic-button.mic-active.recording {
+    border-color: var(--accent-red);
+    background: rgba(239, 68, 68, 0.15);
+    color: var(--accent-red);
+    animation: pulse 1.5s ease-in-out infinite;
 }
 
 .mic-button.recording {

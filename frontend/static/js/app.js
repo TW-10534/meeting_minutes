@@ -605,6 +605,28 @@ App.Meeting._createdMeetingId = null;
 App.Meeting._createdMeetingCode = null;
 App.Meeting._lastEndedMeetingId = null;
 
+// Live streaming state
+App.Meeting._micActive = false;
+App.Meeting._audioContext = null;
+App.Meeting._analyserNode = null;
+App.Meeting._audioStream = null;
+App.Meeting._vadInterval = null;
+App.Meeting._isSpeaking = false;
+App.Meeting._silenceStart = 0;
+App.Meeting._speechStart = 0;
+App.Meeting._segmentCounter = 0;
+App.Meeting._pendingSegments = 0;
+App.Meeting._noSpeechTimer = null;
+App.Meeting._lastSegmentSendTime = 0;
+App.Meeting._mimeType = null;
+
+// VAD constants
+App.Meeting.VAD_THRESHOLD = 0.015;
+App.Meeting.VAD_SPEECH_SEND_INTERVAL = 1500;
+App.Meeting.VAD_MIN_SPEECH_DURATION = 300;
+App.Meeting.VAD_MAX_SEGMENT_DURATION = 15000;
+App.Meeting.VAD_AUTO_OFF_TIMEOUT = 5000;
+
 App.Meeting.handleCreate = async function (e) {
     e.preventDefault();
     var name = document.getElementById("createName").value.trim();
@@ -704,7 +726,7 @@ App.Meeting.enterRoom = function (meetingId, language) {
     document.getElementById("app-view").classList.remove("active");
     document.getElementById("meeting-room-view").classList.add("active");
     document.getElementById("transcriptMessages").innerHTML =
-        '<div class="empty-state" id="transcriptEmpty"><div class="empty-state-icon">&#x1F399;</div><h3>Waiting for speech...</h3><p>Press and hold the microphone button or spacebar to speak</p></div>';
+        '<div class="empty-state" id="transcriptEmpty"><div class="empty-state-icon">&#x1F399;</div><h3>Waiting for speech...</h3><p>Toggle the microphone or press spacebar to begin live transcription</p></div>';
     document.getElementById("participantsList").innerHTML = "";
     document.getElementById("pendingList").innerHTML = "";
     document.getElementById("waitingRoomSection").style.display = "none";
@@ -836,6 +858,24 @@ App.Meeting._handleWSMessage = function (data) {
             App.Meeting._displayTranscript(data);
             break;
 
+        case "transcript_update":
+            App.Meeting._handleTranscriptUpdate(data);
+            break;
+
+        case "transcript_ack":
+            if (data.segmentId !== undefined) {
+                App.Meeting._pendingSegments = Math.max(0, App.Meeting._pendingSegments - 1);
+            }
+            break;
+
+        case "coherence_complete":
+            // Only mark this speaker's interim transcripts as no longer interim
+            document.querySelectorAll(".transcript-interim").forEach(function (el) {
+                el.classList.remove("transcript-interim");
+                el.classList.add("transcript-final");
+            });
+            break;
+
         case "meeting_ended":
             App.Meeting._lastEndedMeetingId = App.Meeting._meetingId;
             App.Meeting._cleanupRoom();
@@ -935,6 +975,16 @@ App.Meeting.rejectParticipant = function (userId) {
 
 App.Meeting._displayTranscript = function (data) {
     var container = document.getElementById("transcriptMessages");
+
+    // If bubble already exists for this transcript, update it instead of creating duplicate
+    if (data.transcriptId) {
+        var existing = document.querySelector('[data-transcript-id="' + data.transcriptId + '"]');
+        if (existing) {
+            App.Meeting._handleTranscriptUpdate(data);
+            return;
+        }
+    }
+
     var empty = document.getElementById("transcriptEmpty");
     if (empty) empty.remove();
 
@@ -951,6 +1001,15 @@ App.Meeting._displayTranscript = function (data) {
 
     var el = document.createElement("div");
     el.className = "transcript-message";
+
+    // Add transcript ID and interim/final status
+    if (data.transcriptId) {
+        el.setAttribute("data-transcript-id", data.transcriptId);
+    }
+    if (data.status === "interim") {
+        el.classList.add("transcript-interim");
+    }
+
     el.innerHTML =
         '<div class="transcript-avatar ' + avatarClass + '">' + initial + '</div>' +
         '<div class="transcript-content">' +
@@ -966,67 +1025,265 @@ App.Meeting._displayTranscript = function (data) {
     container.scrollTop = container.scrollHeight;
 };
 
-/* ─── Audio Recording ────────────────────────────────────────────────────── */
+App.Meeting._handleTranscriptUpdate = function (data) {
+    if (!data.transcriptId) return;
+    var el = document.querySelector('[data-transcript-id="' + data.transcriptId + '"]');
+    if (!el) return;
 
-App.Meeting.toggleRecording = function () {
-    if (App.Meeting._recording) {
-        App.Meeting.stopRecording();
-    } else {
-        App.Meeting.startRecording();
+    // Update text content if provided
+    if (data.displayText) {
+        var textEl = el.querySelector(".transcript-text");
+        if (textEl) textEl.textContent = data.displayText;
+    }
+    if (data.translatedText) {
+        var transEl = el.querySelector(".transcript-translation");
+        if (transEl) {
+            transEl.textContent = data.translatedText;
+        } else {
+            var contentEl = el.querySelector(".transcript-content");
+            if (contentEl) {
+                var newTrans = document.createElement("div");
+                newTrans.className = "transcript-translation";
+                newTrans.textContent = data.translatedText;
+                contentEl.appendChild(newTrans);
+            }
+        }
+    }
+
+    // Update status styling
+    if (data.status === "final") {
+        el.classList.remove("transcript-interim");
+        el.classList.add("transcript-final");
+    }
+
+    // Auto-scroll as the bubble grows
+    var container = document.getElementById("transcriptMessages");
+    if (container) {
+        container.scrollTop = container.scrollHeight;
     }
 };
 
-App.Meeting.startRecording = async function () {
-    if (App.Meeting._recording || !App.Meeting._inRoom) return;
-    App.Meeting._recording = true;
-    document.getElementById("micButton").classList.add("recording");
+/* ─── Live Streaming Audio ───────────────────────────────────────────────── */
+
+App.Meeting.toggleRecording = function () {
+    if (App.Meeting._micActive) {
+        App.Meeting.stopMic();
+    } else {
+        App.Meeting.startMic();
+    }
+};
+
+App.Meeting.startMic = async function () {
+    if (App.Meeting._micActive || !App.Meeting._inRoom) return;
+    var micBtn = document.getElementById("micButton");
 
     try {
         var stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        var mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus") ? "audio/webm;codecs=opus" : "audio/webm";
-        App.Meeting._mediaRecorder = new MediaRecorder(stream, { mimeType: mimeType });
-        App.Meeting._audioChunks = [];
+        App.Meeting._audioStream = stream;
+        App.Meeting._micActive = true;
+        App.Meeting._recording = false;
+        App.Meeting._isSpeaking = false;
+        App.Meeting._segmentCounter = 0;
+        App.Meeting._pendingSegments = 0;
+        App.Meeting._lastSegmentSendTime = 0;
+        App.Meeting._mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+            ? "audio/webm;codecs=opus" : "audio/webm";
 
+        // Create AudioContext + AnalyserNode for volume monitoring
+        App.Meeting._audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        var source = App.Meeting._audioContext.createMediaStreamSource(stream);
+        App.Meeting._analyserNode = App.Meeting._audioContext.createAnalyser();
+        App.Meeting._analyserNode.fftSize = 2048;
+        source.connect(App.Meeting._analyserNode);
+
+        micBtn.classList.add("mic-active");
+
+        // Start VAD polling every 50ms
+        App.Meeting._vadInterval = setInterval(App.Meeting._vadPoll, 50);
+
+        // Start 5s auto-off timer
+        App.Meeting._resetNoSpeechTimer();
+    } catch (err) {
+        App.Utils.toast("Microphone access denied", "error");
+    }
+};
+
+App.Meeting.stopMic = function () {
+    if (!App.Meeting._micActive) return;
+    var micBtn = document.getElementById("micButton");
+
+    // Stop VAD polling
+    if (App.Meeting._vadInterval) {
+        clearInterval(App.Meeting._vadInterval);
+        App.Meeting._vadInterval = null;
+    }
+
+    // Clear auto-off timer
+    if (App.Meeting._noSpeechTimer) {
+        clearTimeout(App.Meeting._noSpeechTimer);
+        App.Meeting._noSpeechTimer = null;
+    }
+
+    // Finalize any in-progress segment
+    if (App.Meeting._isSpeaking) {
+        App.Meeting._finishSegment();
+        App.Meeting._isSpeaking = false;
+    }
+
+    // Send finalize_speech signal
+    if (App.Meeting._ws && App.Meeting._ws.readyState === WebSocket.OPEN) {
+        App.Meeting._ws.send(JSON.stringify({ type: "finalize_speech" }));
+    }
+
+    // Release mic stream and close AudioContext
+    if (App.Meeting._audioStream) {
+        App.Meeting._audioStream.getTracks().forEach(function (t) { t.stop(); });
+        App.Meeting._audioStream = null;
+    }
+    if (App.Meeting._audioContext) {
+        App.Meeting._audioContext.close().catch(function () {});
+        App.Meeting._audioContext = null;
+        App.Meeting._analyserNode = null;
+    }
+
+    App.Meeting._micActive = false;
+    App.Meeting._recording = false;
+    micBtn.classList.remove("mic-active", "recording");
+    micBtn.style.setProperty("--vol-intensity", "0");
+};
+
+// Backward-compatible aliases
+App.Meeting.startRecording = App.Meeting.startMic;
+App.Meeting.stopRecording = App.Meeting.stopMic;
+
+App.Meeting._resetNoSpeechTimer = function () {
+    if (App.Meeting._noSpeechTimer) {
+        clearTimeout(App.Meeting._noSpeechTimer);
+    }
+    App.Meeting._noSpeechTimer = setTimeout(function () {
+        if (App.Meeting._micActive) {
+            App.Meeting.stopMic();
+        }
+    }, App.Meeting.VAD_AUTO_OFF_TIMEOUT);
+};
+
+App.Meeting._vadPoll = function () {
+    if (!App.Meeting._analyserNode) return;
+
+    var bufferLength = App.Meeting._analyserNode.fftSize;
+    var dataArray = new Float32Array(bufferLength);
+    App.Meeting._analyserNode.getFloatTimeDomainData(dataArray);
+
+    // Calculate RMS volume
+    var sum = 0;
+    for (var i = 0; i < bufferLength; i++) {
+        sum += dataArray[i] * dataArray[i];
+    }
+    var rms = Math.sqrt(sum / bufferLength);
+
+    // Update volume indicator on mic button
+    var micBtn = document.getElementById("micButton");
+    var volIntensity = Math.min(1, rms / 0.1);
+    micBtn.style.setProperty("--vol-intensity", volIntensity.toFixed(3));
+
+    var now = Date.now();
+
+    if (rms >= App.Meeting.VAD_THRESHOLD) {
+        // Speech detected
+        App.Meeting._resetNoSpeechTimer();
+
+        if (!App.Meeting._isSpeaking) {
+            // Start speaking
+            App.Meeting._isSpeaking = true;
+            App.Meeting._speechStart = now;
+            App.Meeting._lastSegmentSendTime = now;
+            App.Meeting._recording = true;
+            micBtn.classList.add("recording");
+            App.Meeting._startSegmentRecorder();
+        } else {
+            // Already speaking — check if 1.5s elapsed for periodic send
+            var elapsed = now - App.Meeting._lastSegmentSendTime;
+            if (elapsed >= App.Meeting.VAD_SPEECH_SEND_INTERVAL) {
+                App.Meeting._finishSegment();
+                App.Meeting._lastSegmentSendTime = now;
+                App.Meeting._startSegmentRecorder();
+            }
+            // Force-split at 15s
+            var totalElapsed = now - App.Meeting._speechStart;
+            if (totalElapsed >= App.Meeting.VAD_MAX_SEGMENT_DURATION) {
+                App.Meeting._finishSegment();
+                App.Meeting._speechStart = now;
+                App.Meeting._lastSegmentSendTime = now;
+                App.Meeting._startSegmentRecorder();
+            }
+        }
+        App.Meeting._silenceStart = 0;
+    } else {
+        // Silence detected
+        if (App.Meeting._isSpeaking) {
+            if (!App.Meeting._silenceStart) {
+                App.Meeting._silenceStart = now;
+            }
+            // If silence for more than 300ms (min speech duration), finish segment
+            if (now - App.Meeting._silenceStart > App.Meeting.VAD_MIN_SPEECH_DURATION) {
+                App.Meeting._finishSegment();
+                App.Meeting._isSpeaking = false;
+                App.Meeting._recording = false;
+                micBtn.classList.remove("recording");
+            }
+        }
+    }
+};
+
+App.Meeting._startSegmentRecorder = function () {
+    if (!App.Meeting._audioStream) return;
+    try {
+        App.Meeting._mediaRecorder = new MediaRecorder(App.Meeting._audioStream, {
+            mimeType: App.Meeting._mimeType
+        });
+        App.Meeting._audioChunks = [];
         App.Meeting._mediaRecorder.ondataavailable = function (e) {
             if (e.data.size > 0) App.Meeting._audioChunks.push(e.data);
         };
-
-        App.Meeting._mediaRecorder.onstop = function () {
-            stream.getTracks().forEach(function (t) { t.stop(); });
-            if (App.Meeting._audioChunks.length > 0) {
-                var blob = new Blob(App.Meeting._audioChunks, { type: mimeType });
-                App.Meeting._sendAudio(blob);
-            }
-        };
-
         App.Meeting._mediaRecorder.start();
     } catch (err) {
-        App.Utils.toast("Microphone access denied", "error");
-        App.Meeting._recording = false;
-        document.getElementById("micButton").classList.remove("recording");
+        console.error("Failed to start segment recorder:", err);
     }
 };
 
-App.Meeting.stopRecording = function () {
-    if (!App.Meeting._recording) return;
-    App.Meeting._recording = false;
-    document.getElementById("micButton").classList.remove("recording");
-    if (App.Meeting._mediaRecorder && App.Meeting._mediaRecorder.state === "recording") {
-        App.Meeting._mediaRecorder.stop();
-    }
+App.Meeting._finishSegment = function () {
+    if (!App.Meeting._mediaRecorder || App.Meeting._mediaRecorder.state !== "recording") return;
+    var recorder = App.Meeting._mediaRecorder;
+    var chunks = App.Meeting._audioChunks;
+    var segmentId = App.Meeting._segmentCounter++;
+    var mimeType = App.Meeting._mimeType;
+
+    recorder.ondataavailable = function (e) {
+        if (e.data.size > 0) chunks.push(e.data);
+    };
+    recorder.onstop = function () {
+        if (chunks.length > 0) {
+            var blob = new Blob(chunks, { type: mimeType });
+            App.Meeting._sendAudioSegment(blob, segmentId);
+        }
+    };
+    recorder.stop();
+    App.Meeting._mediaRecorder = null;
+    App.Meeting._audioChunks = [];
 };
 
-App.Meeting._sendAudio = async function (blob) {
+App.Meeting._sendAudioSegment = function (blob, segmentId) {
     if (blob.size < 100) return;
+    App.Meeting._pendingSegments++;
 
-    // Send via WebSocket as base64
     var reader = new FileReader();
     reader.onloadend = function () {
         var base64 = reader.result.split(",")[1];
         if (App.Meeting._ws && App.Meeting._ws.readyState === WebSocket.OPEN) {
             App.Meeting._ws.send(JSON.stringify({
                 type: "audio",
-                data: base64
+                data: base64,
+                segmentId: segmentId
             }));
         }
     };
@@ -1071,7 +1328,7 @@ App.Meeting._cleanupRoom = function () {
     App.Meeting._timerStart = null;
     App.Meeting._participants = {};
     App.Meeting._isHost = false;
-    App.Meeting.stopRecording();
+    App.Meeting.stopMic();
 
     document.getElementById("meeting-room-view").classList.remove("active");
     document.getElementById("endMeetingBtn").style.display = "none";
