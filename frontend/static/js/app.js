@@ -944,9 +944,12 @@ App.Meeting._displayTranscript = function (data) {
     var langName = App.LANG_NAMES[data.originalLanguage] || data.originalLanguage;
     var time = App.Utils.formatTime(data.timestamp || new Date().toISOString());
 
-    var translationHtml = "";
-    if (data.translatedText) {
-        translationHtml = '<div class="transcript-translation">' + App.Utils.escapeHtml(data.translatedText) + '</div>';
+    var mainText = data.displayText || data.originalText;
+
+    // If another language was not translated, show a subtle indicator
+    var untranslatedHtml = "";
+    if (data.originalLanguage !== App.Meeting._language && data.translated === false) {
+        untranslatedHtml = '<span class="transcript-untranslated-badge">untranslated</span>';
     }
 
     var el = document.createElement("div");
@@ -958,9 +961,9 @@ App.Meeting._displayTranscript = function (data) {
         '<span class="transcript-name">' + App.Utils.escapeHtml(data.speakerName) + '</span>' +
         '<span class="transcript-lang-badge ' + langBadgeClass + '">' + langName + '</span>' +
         '<span class="transcript-time">' + time + '</span>' +
+        untranslatedHtml +
         '</div>' +
-        '<div class="transcript-text">' + App.Utils.escapeHtml(data.displayText || data.originalText) + '</div>' +
-        translationHtml +
+        '<div class="transcript-text">' + App.Utils.escapeHtml(mainText) + '</div>' +
         '</div>';
     container.appendChild(el);
     container.scrollTop = container.scrollHeight;
@@ -2453,6 +2456,13 @@ App.Meeting._displayReaction = function (data) {
                         badge.style.display = "";
                     }
                     App.Utils.toast("New task: " + (data.item.description || "").substring(0, 60), "info");
+                }
+                return;
+            case "transcript_history":
+                if (data.transcripts && data.transcripts.length > 0) {
+                    data.transcripts.forEach(function (t) {
+                        App.Meeting._displayTranscript(t);
+                    });
                 }
                 return;
             case "action_item_updated":

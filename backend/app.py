@@ -669,6 +669,8 @@ async def meeting_websocket(websocket: WebSocket, meeting_id: str):
                     "participants": participants,
                     "notes": room.notes
                 })
+                # Send transcript history for late/reconnecting participants
+                await room._send_transcript_history(user_id, websocket)
                 await room._broadcast({
                     "type": "participant_joined",
                     "userId": user_id,

@@ -79,6 +79,9 @@ class MeetingRoom:
                 })
         await self._send(ws, {"type": "participant_list", "participants": participants})
 
+        # Send transcript history so late joiners can see what happened before
+        await self._send_transcript_history(user_id, ws)
+
         # Notify all existing participants about the new one
         await self._broadcast({
             "type": "participant_joined",
@@ -128,6 +131,9 @@ class MeetingRoom:
             "pendingParticipants": pending_list,
             "notes": self.notes
         })
+
+        # Send transcript history in case host is reconnecting
+        await self._send_transcript_history(user_id, ws)
 
     async def remove_connection(self, user_id: int):
         """Remove a connection from the meeting."""
@@ -200,9 +206,15 @@ class MeetingRoom:
                 }
                 if user_lang == speaker_lang:
                     message["displayText"] = original_text
+                    message["translated"] = False
                 else:
-                    message["displayText"] = translations.get(user_lang, original_text)
-                    message["translatedText"] = translations.get(user_lang, "")
+                    translated = translations.get(user_lang)
+                    if translated:
+                        message["displayText"] = translated
+                        message["translated"] = True
+                    else:
+                        message["displayText"] = original_text
+                        message["translated"] = False
                 try:
                     await self._send(ws, message)
                 except Exception as e:
@@ -267,11 +279,45 @@ class MeetingRoom:
             "content": content
         }, exclude={user_id})
 
+    async def _send_transcript_history(self, user_id: int, ws: WebSocket):
+        """Send previous transcripts to a late-joining participant."""
+        user_lang = self.user_languages.get(user_id, "en")
+        try:
+            transcripts = await db.get_meeting_transcripts(self.meeting_id)
+            if not transcripts:
+                return
+            history = []
+            for t in transcripts:
+                msg = {
+                    "speakerId": t["speaker_id"],
+                    "speakerName": t["speaker_name"],
+                    "originalText": t["original_text"],
+                    "originalLanguage": t["original_language"],
+                    "timestamp": t["timestamp"],
+                }
+                if user_lang == t["original_language"]:
+                    msg["displayText"] = t["original_text"]
+                    msg["translated"] = False
+                else:
+                    translations = t.get("translations", {})
+                    translated = translations.get(user_lang)
+                    if translated:
+                        msg["displayText"] = translated
+                        msg["translated"] = True
+                    else:
+                        msg["displayText"] = t["original_text"]
+                        msg["translated"] = False
+                history.append(msg)
+            await self._send(ws, {"type": "transcript_history", "transcripts": history})
+        except Exception as e:
+            logger.error(f"Failed to send transcript history to user {user_id}: {e}")
+
     async def _translate_and_store(self, transcript_id, text, source_lang, target_lang, translations_dict):
         """Translate text and store result."""
         translated = await models.translate_text(text, source_lang, target_lang)
-        translations_dict[target_lang] = translated
-        await db.save_translation(transcript_id, target_lang, translated)
+        if translated:
+            translations_dict[target_lang] = translated
+            await db.save_translation(transcript_id, target_lang, translated)
 
     async def _get_host_id(self):
         """Get the host user ID for this meeting."""

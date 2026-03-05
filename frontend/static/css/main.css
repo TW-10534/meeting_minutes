@@ -1211,6 +1211,17 @@ a:hover { text-decoration: underline; }
     color: var(--text-muted);
 }
 
+.transcript-untranslated-badge {
+    font-size: 9px;
+    font-weight: 600;
+    padding: 1px 5px;
+    border-radius: 4px;
+    background: rgba(245, 158, 11, 0.15);
+    color: var(--accent-amber);
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+}
+
 .transcript-text {
     font-size: 14px;
     line-height: 1.6;

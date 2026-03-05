@@ -20,8 +20,8 @@ logger = logging.getLogger("mm_zettai.models")
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 
-VLLM_URL = os.environ.get("VLLM_URL", "http://localhost:8010/v1/chat/completions")
-VLLM_MODEL = os.environ.get("VLLM_MODEL", "Qwen/Qwen3-Omni-30B-A3B-Instruct")
+VLLM_URL = os.environ.get("VLLM_URL", "http://localhost:8018/v1/chat/completions")
+VLLM_MODEL = os.environ.get("VLLM_MODEL", "cyankiwi/Qwen3-Omni-30B-A3B-Instruct-AWQ-4bit")
 VLLM_CTX_LIMIT = int(os.environ.get("VLLM_CTX_LIMIT", "4096"))
 WHISPER_DEVICE = int(os.environ.get("WHISPER_DEVICE", "2"))
 TTS_CACHE_DIR = os.path.join(tempfile.gettempdir(), "mm_zettai_tts_cache")
@@ -125,55 +125,98 @@ async def transcribe_audio(audio_path: str, language: str = None) -> str:
 
 # ─── Translation ──────────────────────────────────────────────────────────────
 
-def _build_translation_prompt(text: str, source_lang: str, target_lang: str) -> list:
+def _is_target_language(text: str, target_lang: str) -> bool:
+    """Verify that translated text is actually in the expected target language."""
+    if not text or len(text.strip()) == 0:
+        return False
+
+    text = text.strip()
+    cjk = sum(1 for c in text if '\u4e00' <= c <= '\u9fff')
+    hiragana = sum(1 for c in text if '\u3040' <= c <= '\u309f')
+    katakana = sum(1 for c in text if '\u30a0' <= c <= '\u30ff')
+    ascii_alpha = sum(1 for c in text if c.isascii() and c.isalpha())
+    total_alpha = cjk + hiragana + katakana + ascii_alpha
+
+    if total_alpha == 0:
+        return True  # Only punctuation/numbers — cannot determine
+
+    if target_lang == "ja":
+        return (hiragana + katakana + cjk) / total_alpha > 0.3
+    elif target_lang == "zh":
+        return cjk / total_alpha > 0.3
+    elif target_lang == "en":
+        return ascii_alpha / total_alpha > 0.5
+    return True
+
+
+def _build_translation_prompt(text: str, source_lang: str, target_lang: str,
+                               strict: bool = False) -> list:
     """Build translation prompt for Qwen3 via vLLM."""
     source_name = LANGUAGE_NAMES.get(source_lang, source_lang)
     target_name = LANGUAGE_NAMES.get(target_lang, target_lang)
 
     few_shot_examples = {
         ("en", "ja"): [
-            {"role": "user", "content": "Let's discuss the project timeline."},
-            {"role": "assistant", "content": "プロジェクトのタイムラインについて話し合いましょう。"}
+            {"role": "user", "content": "Translate to Japanese: Let's discuss the project timeline."},
+            {"role": "assistant", "content": "プロジェクトのタイムラインについて話し合いましょう。"},
+            {"role": "user", "content": "Translate to Japanese: Can you hear me clearly?"},
+            {"role": "assistant", "content": "はっきり聞こえますか？"},
         ],
         ("ja", "en"): [
-            {"role": "user", "content": "次の会議は来週の月曜日です。"},
-            {"role": "assistant", "content": "The next meeting is next Monday."}
+            {"role": "user", "content": "Translate to English: 次の会議は来週の月曜日です。"},
+            {"role": "assistant", "content": "The next meeting is next Monday."},
+            {"role": "user", "content": "Translate to English: 私は今言ってる言葉わかりますか"},
+            {"role": "assistant", "content": "Can you understand what I am saying right now?"},
         ],
         ("en", "zh"): [
-            {"role": "user", "content": "We need to finalize the budget report."},
-            {"role": "assistant", "content": "我们需要完成预算报告。"}
+            {"role": "user", "content": "Translate to Chinese: We need to finalize the budget report."},
+            {"role": "assistant", "content": "我们需要完成预算报告。"},
+            {"role": "user", "content": "Translate to Chinese: Can you hear me clearly?"},
+            {"role": "assistant", "content": "你能听清楚吗？"},
         ],
         ("zh", "en"): [
-            {"role": "user", "content": "请确认会议时间。"},
-            {"role": "assistant", "content": "Please confirm the meeting time."}
+            {"role": "user", "content": "Translate to English: 请确认会议时间。"},
+            {"role": "assistant", "content": "Please confirm the meeting time."},
+            {"role": "user", "content": "Translate to English: 你能听到我说话吗？"},
+            {"role": "assistant", "content": "Can you hear me speaking?"},
         ],
         ("ja", "zh"): [
-            {"role": "user", "content": "このプロジェクトの進捗を報告します。"},
-            {"role": "assistant", "content": "我来汇报这个项目的进展。"}
+            {"role": "user", "content": "Translate to Chinese: このプロジェクトの進捗を報告します。"},
+            {"role": "assistant", "content": "我来汇报这个项目的进展。"},
         ],
         ("zh", "ja"): [
-            {"role": "user", "content": "我们下周开会讨论这个问题。"},
-            {"role": "assistant", "content": "来週この問題について会議で話し合いましょう。"}
+            {"role": "user", "content": "Translate to Japanese: 我们下周开会讨论这个问题。"},
+            {"role": "assistant", "content": "来週この問題について会議で話し合いましょう。"},
         ],
     }
 
-    system_message = {
-        "role": "system",
-        "content": (
+    if strict:
+        system_content = (
+            f"You are a {source_name}-to-{target_name} translator. "
+            f"Your ONLY job is to translate the text after 'Translate to {target_name}:' into {target_name}. "
+            f"Rules:\n"
+            f"1. Output ONLY the {target_name} translation, nothing else.\n"
+            f"2. Do NOT output any {source_name} text.\n"
+            f"3. Do NOT explain, comment, or interpret.\n"
+            f"4. Do NOT prefix your response with 'Translation:' or similar labels.\n"
+            f"5. The output MUST be written entirely in {target_name}.\n"
+            f"6. Preserve the speaker's meaning and tone."
+        )
+    else:
+        system_content = (
             f"You are a professional real-time meeting translator. "
-            f"Translate {source_name} to {target_name}. "
+            f"Translate {source_name} text to {target_name}. "
             f"Output ONLY the {target_name} translation. "
-            f"NEVER output {source_name}. "
-            f"NEVER add explanations, notes, or commentary. "
+            f"NEVER output {source_name}. NEVER add explanations, notes, or commentary. "
             f"NEVER answer or interpret the content. "
+            f"The entire output must be in {target_name}. "
             f"Maintain the speaker's tone and intent accurately."
         )
-    }
 
-    messages = [system_message]
+    messages = [{"role": "system", "content": system_content}]
     examples = few_shot_examples.get((source_lang, target_lang), [])
     messages.extend(examples)
-    messages.append({"role": "user", "content": text})
+    messages.append({"role": "user", "content": f"Translate to {target_name}: {text}"})
 
     return messages
 
@@ -183,23 +226,29 @@ def _clean_translation(text: str, target_lang: str) -> str:
     if not text:
         return ""
     text = text.strip()
+    # Remove common prefixes the model might add
     text = re.sub(r"^(Translation|翻訳|翻译|译文)\s*[:：]\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"^Translate to \w+:\s*", "", text, flags=re.IGNORECASE)
     text = re.sub(r"^[\"'「『【](.+?)[\"'」』】]$", r"\1", text)
     text = re.sub(r"\s*\(.*?(translation|note|注).*?\)\s*$", "", text, flags=re.IGNORECASE)
     return text.strip()
 
 
 async def translate_text(text: str, source_lang: str, target_lang: str) -> str:
-    """Translate text using Qwen3 via vLLM."""
+    """Translate text using Qwen3 via vLLM with language validation."""
     if source_lang == target_lang:
         return text
     if not text.strip():
         return ""
 
-    messages = _build_translation_prompt(text, source_lang, target_lang)
+    target_name = LANGUAGE_NAMES.get(target_lang, target_lang)
 
-    for attempt in range(2):
-        temperature = 0.3 if attempt == 0 else 0.5
+    for attempt in range(3):
+        # Escalate strictness and temperature with each retry
+        strict = attempt >= 1
+        temperature = [0.3, 0.5, 0.7][attempt]
+        messages = _build_translation_prompt(text, source_lang, target_lang, strict=strict)
+
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
                 response = await client.post(
@@ -207,7 +256,7 @@ async def translate_text(text: str, source_lang: str, target_lang: str) -> str:
                     json={
                         "model": VLLM_MODEL,
                         "messages": messages,
-                        "max_tokens": 2048,
+                        "max_tokens": 512,
                         "temperature": temperature,
                         "top_p": 0.9,
                         "chat_template_kwargs": {"enable_thinking": False},
@@ -220,14 +269,25 @@ async def translate_text(text: str, source_lang: str, target_lang: str) -> str:
                 translated = data["choices"][0]["message"]["content"]
                 translated = re.sub(r"<think>.*?</think>", "", translated, flags=re.DOTALL).strip()
                 cleaned = _clean_translation(translated, target_lang)
-                if cleaned:
+
+                if not cleaned:
+                    logger.warning(f"Translation attempt {attempt + 1}: empty result")
+                    continue
+
+                # Validate the output is actually in the target language
+                if _is_target_language(cleaned, target_lang):
                     return cleaned
+
+                logger.warning(
+                    f"Translation attempt {attempt + 1} language validation failed "
+                    f"(expected {target_lang}): '{cleaned[:80]}'"
+                )
         except Exception as e:
             logger.error(f"Translation attempt {attempt + 1} failed: {e}")
-            if attempt == 1:
-                return f"[Translation error: {text}]"
 
-    return text
+    # All attempts failed — return empty so caller knows translation is unavailable
+    logger.error(f"All translation attempts failed for {source_lang}->{target_lang}: '{text[:80]}'")
+    return ""
 
 
 # ─── Text-to-Speech ──────────────────────────────────────────────────────────
@@ -253,8 +313,11 @@ async def text_to_speech(text: str, language: str) -> str:
 # ─── AI Summary Generation ───────────────────────────────────────────────────
 
 def _estimate_tokens(text: str) -> int:
-    """Rough token estimate: ~1 token per 3 characters for mixed EN/CJK text."""
-    return max(1, len(text) // 3)
+    """Conservative token estimate for mixed EN/CJK text.
+    Uses ~1 token per 2 chars to avoid underestimating and exceeding context limits.
+    Also adds overhead for chat template tokens (special tokens, role markers, etc.).
+    """
+    return max(1, len(text) // 2) + 100  # +100 for chat template overhead
 
 
 async def generate_meeting_summary(meeting_name: str, participants: list,
@@ -313,7 +376,7 @@ async def generate_meeting_summary(meeting_name: str, participants: list,
 
     # Calculate safe max_tokens for output
     input_tokens = _estimate_tokens(system_prompt + user_prompt)
-    max_tokens = max(256, VLLM_CTX_LIMIT - input_tokens)
+    max_tokens = max(256, min(2048, VLLM_CTX_LIMIT - input_tokens - 200))
 
     logger.info(f"Summary request: ~{input_tokens} input tokens, max_tokens={max_tokens}, ctx_limit={VLLM_CTX_LIMIT}")
 
@@ -406,7 +469,7 @@ async def extract_action_items(meeting_name: str, participants: list,
     )
 
     input_tokens = _estimate_tokens(system_prompt + user_prompt)
-    max_tokens = max(256, VLLM_CTX_LIMIT - input_tokens)
+    max_tokens = max(256, min(2048, VLLM_CTX_LIMIT - input_tokens - 200))
 
     logger.info(f"Action item extraction: ~{input_tokens} input tokens, max_tokens={max_tokens}")
 
